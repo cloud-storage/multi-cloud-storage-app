@@ -2,12 +2,14 @@ package clouduploader
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
-	"strings"
+	"path/filepath"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/storage"
+	"github.com/multi-cloud-storage-app/filelisting"
 	"github.com/nu7hatch/gouuid"
 )
 
@@ -23,37 +25,47 @@ type CloudStorageProperties struct {
 
 //UploadResults data for successful upload
 type UploadResults struct {
-	Bytes    uint64
-	Files    uint64
-	Duration uint64
+	FileName string
+	Bytes    int64
+	Duration int64
+	Status   bool
+	Err      error
 }
 
 //UploadContent upload files and folders to Cloud Storage
-func UploadContent(props CloudStorageProperties) (UploadResults, error) {
-	startTime := time.Now().UnixNano()
-	results := UploadResults{0, 0, 0}
-	fileHandle, err := openSourceFile(props.SourceFiles)
-	if err != nil {
-		return results, err
-	}
-	defer fileHandle.Close()
+func UploadContent(props CloudStorageProperties) (chan UploadResults, error) {
 	blobClient, err := getBlobCLI(props.Account, props.Key)
 	if err != nil {
-		return results, err
+		return nil, err
 	}
-	cnt, err := setUpTargetFolder(props.TargetStorage, blobClient)
+	container, err := setUpTargetFolder(props.TargetStorage, blobClient)
 	if err != nil {
-		return results, err
+		return nil, err
 	}
-	blobName := extractBlobName(props.SourceFiles)
-	bytes, err := uploadDataToBlob(blobName, cnt, fileHandle, props)
-	if err == nil {
-		endTime := time.Now().UnixNano()
-		results.Bytes = bytes
-		results.Files = 1
-		results.Duration = uint64((endTime - startTime) / 1000000)
+
+	uploadProgress := make(chan UploadResults)
+	fileIterator := filelisting.ListFiles(props.SourceFiles)
+	go processFile(uploadProgress, fileIterator, props, container)
+	return uploadProgress, nil
+}
+
+func processFile(uploadProgress chan UploadResults, fileProcess chan filelisting.FileHandle, props CloudStorageProperties, container *storage.Container) {
+	var completedPutBlobs, fileThreads int64
+	putBlobChannel := make(chan int)
+	for fileInfo := range fileProcess {
+		if !fileInfo.FileInfo.IsDir() {
+			fileThreads++
+			go uploadDataToBlob(container, fileInfo, props, uploadProgress, putBlobChannel)
+		}
 	}
-	return results, nil
+	for mon := range putBlobChannel {
+		mon++
+		completedPutBlobs++
+		if completedPutBlobs >= fileThreads {
+			close(putBlobChannel)
+		}
+	}
+	close(uploadProgress)
 }
 
 func openSourceFile(source string) (*os.File, error) {
@@ -80,37 +92,50 @@ func setUpTargetFolder(targetStorage string, blobClient storage.BlobStorageClien
 	return cnt, err
 }
 
-func uploadDataToBlob(blobName string, container *storage.Container, fileHandle *os.File, props CloudStorageProperties) (uint64, error) {
-	var bytes uint64
+func uploadDataToBlob(container *storage.Container, fileInfo filelisting.FileHandle, props CloudStorageProperties, results chan UploadResults, putBlobChannel chan int) {
+	blobName := extractBlobName(fileInfo.FilePath, fileInfo.FileInfo.Name())
+	fileSize := fileInfo.FileInfo.Size()
+	fmt.Printf("Uploading file %s, size %v bytes with part size %v MB\n", blobName, fileSize, props.PartSize)
+
+	startTime := time.Now().UnixNano()
 	blob := container.GetBlobReference(blobName)
 	err := blob.CreateBlockBlob(nil)
 	if err != nil {
-		return 0, err
+		results <- UploadResults{FileName: fileInfo.FileInfo.Name(), Bytes: fileSize, Status: false, Err: err}
+		putBlobChannel <- 1
+		return
 	}
-	fileInfo, err := fileHandle.Stat()
+	fileHandle, err := openSourceFile(props.SourceFiles)
 	if err != nil {
-		return bytes, err
+		results <- UploadResults{FileName: fileInfo.FileInfo.Name(), Bytes: fileSize, Status: false, Err: err}
+		putBlobChannel <- 1
+		return
 	}
-	fileSize := fileInfo.Size()
-	fmt.Printf("Uploading file %s, size %v bytes with part size %v MB\n", blobName, fileSize, props.PartSize)
+	defer fileHandle.Close()
+
 	partSize := props.PartSize * 1024 * 1024
-
 	parts := getNumberOfParts(partSize, fileSize)
-
-	blockIDList := make([]storage.Block, parts)
 	fmt.Printf("Uploading file %s, number of parts %v\n", blobName, parts)
+	putChannel := putParts(fileHandle, blob, partSize, fileSize, parts)
 
-	putChannel := make(chan storage.Block)
-	var putSize int64
-	for i := int64(0); i < parts; i++ {
-		seekPos := i * partSize
-		if (seekPos + partSize) <= fileSize {
-			putSize = partSize
-		} else {
-			putSize = (fileSize - seekPos)
-		}
-		go putBlock(fileHandle, blob, putChannel, seekPos, putSize)
+	blockIDList, err := getPutResults(putChannel, parts)
+	if err != nil {
+		results <- UploadResults{FileName: fileInfo.FileInfo.Name(), Bytes: fileSize, Status: false, Err: err}
+		putBlobChannel <- 1
+		return
 	}
+	err = blob.PutBlockList(blockIDList, nil)
+	var success = true
+	if err != nil {
+		success = false
+	}
+	endTime := time.Now().UnixNano()
+	results <- UploadResults{FileName: fileInfo.FileInfo.Name(), Bytes: fileSize, Status: success, Err: err, Duration: (endTime - startTime)}
+	putBlobChannel <- 1
+}
+
+func getPutResults(putChannel chan storage.Block, parts int64) ([]storage.Block, error) {
+	blockIDList := make([]storage.Block, parts)
 
 	var completedParts, errorParts int64
 	for block := range putChannel {
@@ -124,28 +149,32 @@ func uploadDataToBlob(blobName string, container *storage.Container, fileHandle 
 			close(putChannel)
 		}
 	}
-
-	fmt.Printf("Uploaded parts, success %v, failed %v\n", completedParts, errorParts)
-
+	var err error
 	if errorParts > 0 {
-		fmt.Println("Failure uploading parts")
-	} else {
-		err = blob.PutBlockList(blockIDList, nil)
-		if err != nil {
-			return 0, err
-		}
+		err = errors.New(fmt.Sprintf("Upload parts in error %v", errorParts))
 	}
-
-	return uint64(fileSize), nil
+	return blockIDList, err
 }
 
-func extractBlobName(filePath string) string {
-	var fileName string
-	index := strings.LastIndex(filePath, "/")
-	if index == -1 {
+func putParts(fileHandle *os.File, blob *storage.Blob, partSize, fileSize, parts int64) chan storage.Block {
+	putChannel := make(chan storage.Block)
+	var putSize int64
+	for i := int64(0); i < parts; i++ {
+		seekPos := i * partSize
+		if (seekPos + partSize) <= fileSize {
+			putSize = partSize
+		} else {
+			putSize = (fileSize - seekPos)
+		}
+		go putBlock(fileHandle, blob, putChannel, seekPos, putSize)
+	}
+	return putChannel
+}
+
+func extractBlobName(prefix, filePath string) string {
+	fileName, err := filepath.Rel(prefix, filePath)
+	if err != nil {
 		fileName = filePath
-	} else {
-		fileName = filePath[(index + 1):len(filePath)]
 	}
 	return fileName
 }
