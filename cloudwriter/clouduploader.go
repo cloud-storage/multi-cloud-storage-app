@@ -21,6 +21,7 @@ type CloudStorageProperties struct {
 	Concurrency   int
 	Account       string
 	Key           string
+	Trace         bool
 }
 
 //UploadResults data for successful upload
@@ -32,8 +33,11 @@ type UploadResults struct {
 	Err      error
 }
 
+var trace = false
+
 //UploadContent upload files and folders to Cloud Storage
 func UploadContent(props CloudStorageProperties) (chan UploadResults, error) {
+	trace = props.Trace
 	blobClient, err := getBlobCLI(props.Account, props.Key)
 	if err != nil {
 		return nil, err
@@ -95,8 +99,9 @@ func setUpTargetFolder(targetStorage string, blobClient storage.BlobStorageClien
 func uploadDataToBlob(container *storage.Container, fileInfo filelisting.FileHandle, props CloudStorageProperties, results chan UploadResults, putBlobChannel chan int) {
 	blobName := extractBlobName(fileInfo.FilePath, fileInfo.FileInfo.Name())
 	fileSize := fileInfo.FileInfo.Size()
-	fmt.Printf("Uploading file %s, size %v bytes with part size %v MB\n", blobName, fileSize, props.PartSize)
-
+	if trace {
+		fmt.Printf("Uploading file %s, size %v bytes with part size %v MB\n", blobName, fileSize, props.PartSize)
+	}
 	startTime := time.Now().UnixNano()
 	blob := container.GetBlobReference(blobName)
 	err := blob.CreateBlockBlob(nil)
@@ -115,7 +120,9 @@ func uploadDataToBlob(container *storage.Container, fileInfo filelisting.FileHan
 
 	partSize := props.PartSize * 1024 * 1024
 	parts := getNumberOfParts(partSize, fileSize)
-	fmt.Printf("Uploading file %s, number of parts %v\n", blobName, parts)
+	if trace {
+		fmt.Printf("Uploading file %s, number of parts %v\n", blobName, parts)
+	}
 	putChannel := putParts(fileHandle, blob, partSize, fileSize, parts)
 
 	blockIDList, err := getPutResults(putChannel, parts)
@@ -202,11 +209,11 @@ func putBlock(fileHandle *os.File, blob *storage.Blob, putChannel chan storage.B
 	blockID := getBlockID()
 	fileHandle.ReadAt(readArray, offSet)
 	err := blob.PutBlock(blockID, readArray, nil)
-	if err == nil {
-		fmt.Printf("Uploaded Part %s, Size %v\n", blockID, putSize)
-	} else {
+	if err != nil && trace {
 		blockID = ""
 		fmt.Printf("Failure to PUT block, %s\n", err)
+	} else if trace {
+		fmt.Printf("Uploaded Part %s, Size %v\n", blockID, putSize)
 	}
 	putChannel <- storage.Block{ID: blockID, Status: storage.BlockStatusUncommitted}
 }
