@@ -42,7 +42,7 @@ func main() {
 	}
 
 	uploadResults := list.New()
-	var fileCount, byteCount int64
+	var fileCount, byteCount, successCount, failCount int64
 	for fileResult := range results {
 		uploadResults.PushBack(fileResult)
 		if *trace {
@@ -50,9 +50,14 @@ func main() {
 		}
 		fileCount++
 		byteCount += fileResult.Bytes
+		if fileResult.Status == false {
+			failCount++
+		} else {
+			successCount++
+		}
 	}
 	endTime := time.Now().UnixNano()
-	displayBasicStats((endTime - startTime), fileCount, byteCount)
+	displayBasicStats((endTime - startTime), fileCount, successCount, failCount, byteCount)
 	if *stats {
 		displayFileStats(uploadResults)
 	}
@@ -71,15 +76,22 @@ func displayFileStats(fileStats *list.List) {
 			status = "Failed"
 		}
 		fmt.Printf("%s - File %s, Bytes %v, Duration %.3f\n", status, fileData.FileName, fileData.Bytes, (float64(fileData.Duration) / float64(1000000)))
+		if fileData.Status == false {
+			fmt.Printf("File %s Failure: %s\n", fileData.FileName, fileData.Err)
+		}
 	}
 }
 
-func displayBasicStats(duration, fileCount, byteCount int64) {
+func displayBasicStats(duration, fileCount, successCount, failCount, byteCount int64) {
 	durationMs := duration / 1000000
 	durationSec := float64(durationMs) / float64(1000)
 	bitCount := float64(byteCount) * 8
 	rate := bitCount / durationSec
-	fmt.Printf("Uploaded Files %v,  Rate %.6f bps, %v Bytes, Duration %v (ms)\n", fileCount, rate, byteCount, durationMs)
+	if failCount > 0 {
+		fmt.Printf("FAILED Total Files %v, Success %v Failed %v Rate %.6f bps, %v Bytes, Duration %v (ms)\n", fileCount, successCount, failCount, rate, byteCount, durationMs)
+	} else {
+		fmt.Printf("Uploaded Total Files %v, Rate %.6f bps, %v Bytes, Duration %v (ms)\n", fileCount, rate, byteCount, durationMs)
+	}
 }
 
 func validateInput(source string, container string) error {
