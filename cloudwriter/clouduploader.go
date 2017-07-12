@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -158,15 +157,11 @@ func uploadDataToBlob(container *storage.Container, fileInfo filelisting.FileHan
 	blob, err := getBlob(container, blobName)
 	if err != nil {
 		reportBlobResults(putBlobChannel, results, fileInfo.FileInfo, 0, err)
-		//		results <- UploadResults{FileName: fileInfo.FileInfo.Name(), Bytes: fileSize, Status: false, Err: err}
-		//		putBlobChannel <- 1
 		return
 	}
 	fileHandle, err := openSourceFile(fileInfo.FilePath)
 	if err != nil {
 		reportBlobResults(putBlobChannel, results, fileInfo.FileInfo, 0, err)
-		//		results <- UploadResults{FileName: fileInfo.FileInfo.Name(), Bytes: fileSize, Status: false, Err: err}
-		//		putBlobChannel <- 1
 		return
 	}
 
@@ -180,20 +175,15 @@ func uploadDataToBlob(container *storage.Container, fileInfo filelisting.FileHan
 	fileHandle.Close()
 	if err != nil {
 		reportBlobResults(putBlobChannel, results, fileInfo.FileInfo, 0, err)
-		//		results <- UploadResults{FileName: fileInfo.FileInfo.Name(), Bytes: fileSize, Status: false, Err: err}
-		//		putBlobChannel <- 1
 		return
 	}
 	err = putBlobBlockList(blob, blockIDList)
 	if err != nil {
 		fmt.Printf("PUT BlockList Failed %s, parts %v, list len %v\n", fileInfo.FileInfo.Name(), parts, len(blockIDList))
-		fmt.Printf("PUT BlockList Failed %s, block list %v\n", fileInfo.FileInfo.Name(), blockIDList)
 	}
 
 	endTime := time.Now().UnixNano()
 	reportBlobResults(putBlobChannel, results, fileInfo.FileInfo, (endTime - startTime), err)
-	//	results <- UploadResults{FileName: fileInfo.FileInfo.Name(), Bytes: fileSize, Status: success, Err: err, Duration: (endTime - startTime)}
-	//	putBlobChannel <- 1
 }
 
 func reportBlobResults(putBlobChannel chan int, results chan UploadResults, fileInfo os.FileInfo, duration int64, err error) {
@@ -255,8 +245,8 @@ func putParts(fileHandle *os.File, blob *storage.Blob, partSize, fileSize, parts
 
 func extractBlobName(prefix, filePath string) string {
 	var fileName string
-	if strings.Compare(prefix, filePath) == 0 {
-		fileName = path.Base(filePath)
+	if strings.Compare(strings.ToLower(prefix), strings.ToLower(filePath)) == 0 {
+		_, fileName = filepath.Split(filePath)
 	} else {
 		var err error
 		fileName, err = filepath.Rel(prefix, filePath)

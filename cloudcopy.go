@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/multi-cloud-storage-app/cloudwriter"
+	"github.com/multi-cloud-storage-app/filelisting"
 )
 
 func main() {
@@ -18,8 +19,9 @@ func main() {
 	container := flag.String("container", "", "Container Name")
 	partSize := flag.Int64("part-size", 100, "Part Size in MB")
 	concurrency := flag.Int("concurrency", 128, "Concurrent Parts")
-	trace := flag.Bool("trace", false, "Trace Progress")
-	stats := flag.Bool("stats", true, "Log File Stats")
+	trace := flag.Bool("trace", false, "Trace Operations")
+	stats := flag.Bool("stats", false, "Display File Stats")
+	progress := flag.Bool("progress", false, "Display Progress")
 	flag.Parse()
 
 	err := validateInput(*sourceToUpload, *container)
@@ -31,6 +33,14 @@ func main() {
 	accountName, accountKey, err := getAccountInfoEnv()
 	if err != nil {
 		errorAndExit(err)
+	}
+
+	var totalBytes, totalFiles int64
+	if *progress {
+		totalBytes, totalFiles, err = filelisting.GetSizes(*sourceToUpload)
+		if err != nil {
+			errorAndExit(err)
+		}
 	}
 
 	fmt.Printf("Upload %s with %v MB Part Size and %v Concurrent Parts\n", *sourceToUpload, *partSize, *concurrency)
@@ -45,9 +55,6 @@ func main() {
 	var fileCount, byteCount, successCount, failCount int64
 	for fileResult := range results {
 		uploadResults.PushBack(fileResult)
-		if *trace {
-			fmt.Printf("Upload result: File %s, Bytes %v, Status %v, Duration %v\n", fileResult.FileName, fileResult.Bytes, fileResult.Status, fileResult.Duration)
-		}
 		fileCount++
 		byteCount += fileResult.Bytes
 		if fileResult.Status == false {
@@ -55,14 +62,35 @@ func main() {
 		} else {
 			successCount++
 		}
+		if *trace {
+			fmt.Printf("Upload result: File %s, Bytes %v, Status %v, Duration %v\n", fileResult.FileName, fileResult.Bytes, fileResult.Status, fileResult.Duration)
+		}
+		if *progress {
+			displayProgress(fileResult, startTime, byteCount, fileCount, totalBytes, totalFiles)
+		}
 	}
 	endTime := time.Now().UnixNano()
+	fmt.Println("")
 	displayBasicStats((endTime - startTime), fileCount, successCount, failCount, byteCount)
 	if *stats {
 		displayFileStats(uploadResults)
 	}
 
 	fmt.Println("Cloud Copy Uploader Complete")
+}
+
+func displayProgress(fileResult clouduploader.UploadResults, startTime, byteCount, fileCount, totalBytes, totalFiles int64) {
+	if byteCount > 0 {
+		endTime := time.Now().UnixNano()
+		duration := endTime - startTime
+		durationMs := duration / 1000000
+		durationSec := float64(durationMs) / float64(1000)
+		bitCount := float64(byteCount) * 8
+		rate := bitCount / durationSec
+
+		percent := ((float64(byteCount) / float64(totalBytes)) * float64(100))
+		fmt.Printf("\r%3.0f percent complete, rate %4.3f bps", percent, rate)
+	}
 }
 
 func displayFileStats(fileStats *list.List) {
