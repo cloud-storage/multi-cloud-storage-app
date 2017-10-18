@@ -8,8 +8,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/multi-cloud-storage-app/cloudwriter"
+	"github.com/multi-cloud-storage-app/s3writer"
 	"github.com/multi-cloud-storage-app/filelisting"
+	"strings"
 )
 
 func main() {
@@ -22,17 +23,30 @@ func main() {
 	trace := flag.Bool("trace", false, "Trace Operations")
 	stats := flag.Bool("stats", false, "Display File Stats")
 	progress := flag.Bool("progress", false, "Display Progress")
+	platform := flag.String( "platform", "azure", "Cloud Storage < aws | azure >")
 	flag.Parse()
 
-	err := validateInput(*sourceToUpload, *container)
+	err := validateInput(*sourceToUpload, *container, *platform)
 	if err != nil {
 		flag.Usage()
 		errorAndExit(err)
 	}
 
-	accountName, accountKey, err := getAccountInfoEnv()
-	if err != nil {
-		errorAndExit(err)
+	accountName, accountKey := getAccountInfoEnv()
+	if (*platform == "azure"){
+		err := validateAccountInfo(accountName, accountKey)
+		if err != nil {
+			errorAndExit(err)
+		}
+	}
+
+	regionName := getRegionFromEnv()
+
+	if (*platform == "aws") {
+		err := validateRegion(regionName)
+		if err != nil {
+			errorAndExit(err)
+		}
 	}
 
 	var totalBytes, totalFiles int64
@@ -43,9 +57,9 @@ func main() {
 		}
 	}
 
-	fmt.Printf("Upload %s with %v MB Part Size and %v Concurrent Parts\n", *sourceToUpload, *partSize, *concurrency)
+	fmt.Printf("Upload to %s, %s with %v MB Part Size and %v Concurrent Parts\n", *platform, *sourceToUpload, *partSize, *concurrency)
 	startTime := time.Now().UnixNano()
-	uploadProperties := clouduploader.CloudStorageProperties{SourceFiles: *sourceToUpload, TargetStorage: *container, PartSize: *partSize, Concurrency: *concurrency, Account: accountName, Key: accountKey, Trace: *trace}
+	uploadProperties := clouduploader.CloudStorageProperties{SourceFiles: *sourceToUpload, TargetStorage: *container, PartSize: *partSize, Concurrency: *concurrency, AccountKey: accountName, SecretKey: accountKey, Region: regionName, Trace: *trace}
 	results, err := clouduploader.UploadContent(uploadProperties)
 	if err != nil {
 		errorAndExit(err)
@@ -89,7 +103,7 @@ func displayProgress(fileResult clouduploader.UploadResults, startTime, byteCoun
 		rate := bitCount / durationSec
 
 		percent := ((float64(byteCount) / float64(totalBytes)) * float64(100))
-		fmt.Printf("\r%3.0f percent complete, rate %4.3f bps", percent, rate)
+		fmt.Printf("\r%3.0f percent complete, rate %4.2f bps", percent, rate)
 	}
 }
 
@@ -116,13 +130,13 @@ func displayBasicStats(duration, fileCount, successCount, failCount, byteCount i
 	bitCount := float64(byteCount) * 8
 	rate := bitCount / durationSec
 	if failCount > 0 {
-		fmt.Printf("FAILED Total Files %v, Success %v Failed %v Rate %.6f bps, %v Bytes, Duration %v (ms)\n", fileCount, successCount, failCount, rate, byteCount, durationMs)
+		fmt.Printf("FAILED Total Files %v, Success %v Failed %v Rate %.2f bps, %v Bytes, Duration %v (ms)\n", fileCount, successCount, failCount, rate, byteCount, durationMs)
 	} else {
-		fmt.Printf("Uploaded Total Files %v, Rate %.6f bps, %v Bytes, Duration %v (ms)\n", fileCount, rate, byteCount, durationMs)
+		fmt.Printf("Uploaded Total Files %v, Rate %.2f bps, %v Bytes, Duration %v (ms)\n", fileCount, rate, byteCount, durationMs)
 	}
 }
 
-func validateInput(source string, container string) error {
+func validateInput(source, container, platform string) error {
 	if len(source) == 0 {
 		return errors.New("Source file or folder to upload must be specified")
 	}
@@ -133,19 +147,42 @@ func validateInput(source string, container string) error {
 	if err != nil {
 		return errors.New("Source file/folder not found, " + source)
 	}
+	if len(platform) == 0 {
+		return errors.New("Cloud Storage must be specified < aws | azure >")
+	}
+	if strings.Compare(platform,"aws") != 0 && strings.Compare(platform,"azure") != 0 {
+		return errors.New("Cloud Storage must be < aws | azure >")
+	}
 	return nil
 }
 
-func getAccountInfoEnv() (string, string, error) {
+func getAccountInfoEnv() (string, string) {
 	accountName := os.Getenv("ACCOUNT_NAME")
 	accountKey := os.Getenv("ACCOUNT_KEY")
-	if len(accountName) == 0 || len(accountKey) == 0 {
-		return "", "", errors.New("Environment variable ACCOUNT_NAME/ACCOUNT_KEY not set")
-	}
-	return accountName, accountKey, nil
+	return accountName, accountKey
+}
+
+func getRegionFromEnv() string {
+	return os.Getenv("AWS_REGION")
 }
 
 func errorAndExit(err error) {
 	fmt.Printf("Cloud Copy exiting; %s\n", err.Error())
 	os.Exit(1)
+}
+
+func validateRegion( region string ) error {
+	var err error = nil
+	if (len(region) == 0 ) {
+		err = errors.New("Region must be specified in environment AWS_REGION when using S3")
+	}
+	return err
+}
+
+func validateAccountInfo(accountName, accountKey string) error {
+	var err error = nil
+	if len(accountName) == 0 || len(accountKey) == 0 {
+		err = errors.New("Environment variable ACCOUNT_NAME/ACCOUNT_KEY not set")
+	}
+	return err
 }
